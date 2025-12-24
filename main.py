@@ -7,6 +7,7 @@ import sys
 import logging
 import sqlite3
 import json
+import markdown
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -17,6 +18,7 @@ from PyQt5.QtWidgets import (
     QLineEdit, QMenuBar, QMenu, QStatusBar, QAbstractItemView, QDialog,
     QDialogButtonBox, QFormLayout, QGroupBox, QFileDialog, QPlainTextEdit
 )
+from PyQt5.QtGui import QClipboard
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont
 
@@ -421,6 +423,131 @@ class ModelManagementDialog(QDialog):
                 QMessageBox.critical(self, "Ошибка", f"Не удалось удалить модель: {str(e)}")
 
 
+class MarkdownViewDialog(QDialog):
+    """Диалог для просмотра ответа в форматированном markdown"""
+    
+    def __init__(self, parent=None, model_name: str = "", response_text: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle(f"Ответ: {model_name}")
+        self.setModal(True)
+        self.setMinimumSize(800, 600)
+        self.original_text = response_text  # Сохраняем оригинальный текст для копирования
+        self.init_ui(model_name, response_text)
+    
+    def init_ui(self, model_name: str, response_text: str):
+        """Инициализация интерфейса диалога"""
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        
+        # Заголовок с названием модели
+        header_label = QLabel(f"<h2>Ответ модели: {model_name}</h2>")
+        layout.addWidget(header_label)
+        
+        # Текстовое поле для отображения markdown
+        self.text_view = QTextEdit()
+        self.text_view.setReadOnly(True)
+        
+        # Конвертация markdown в HTML
+        try:
+            html_content = markdown.markdown(
+                response_text,
+                extensions=['extra', 'codehilite', 'nl2br', 'sane_lists']
+            )
+            # Добавляем стили для улучшения отображения
+            styled_html = f"""
+            <style>
+                body {{
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                    font-size: 14px;
+                    line-height: 1.6;
+                    color: #333;
+                    padding: 10px;
+                }}
+                pre {{
+                    background-color: #f5f5f5;
+                    border: 1px solid #ddd;
+                    border-radius: 4px;
+                    padding: 10px;
+                    overflow-x: auto;
+                }}
+                code {{
+                    background-color: #f5f5f5;
+                    padding: 2px 4px;
+                    border-radius: 3px;
+                    font-family: 'Courier New', monospace;
+                }}
+                pre code {{
+                    background-color: transparent;
+                    padding: 0;
+                }}
+                h1, h2, h3, h4, h5, h6 {{
+                    margin-top: 20px;
+                    margin-bottom: 10px;
+                }}
+                blockquote {{
+                    border-left: 4px solid #ddd;
+                    margin: 0;
+                    padding-left: 20px;
+                    color: #666;
+                }}
+                table {{
+                    border-collapse: collapse;
+                    width: 100%;
+                    margin: 10px 0;
+                }}
+                table th, table td {{
+                    border: 1px solid #ddd;
+                    padding: 8px;
+                    text-align: left;
+                }}
+                table th {{
+                    background-color: #f5f5f5;
+                    font-weight: bold;
+                }}
+                a {{
+                    color: #0066cc;
+                    text-decoration: none;
+                }}
+                a:hover {{
+                    text-decoration: underline;
+                }}
+            </style>
+            <body>
+            {html_content}
+            </body>
+            """
+            self.text_view.setHtml(styled_html)
+        except Exception as e:
+            # Если не удалось отформатировать, показываем как обычный текст
+            logger.warning(f"Ошибка при форматировании markdown: {e}")
+            self.text_view.setPlainText(response_text)
+        
+        layout.addWidget(self.text_view)
+        
+        # Кнопки
+        buttons_layout = QHBoxLayout()
+        copy_btn = QPushButton("Копировать текст")
+        copy_btn.clicked.connect(self.copy_text)
+        buttons_layout.addWidget(copy_btn)
+        buttons_layout.addStretch()
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        buttons_layout.addWidget(buttons)
+        layout.addLayout(buttons_layout)
+    
+    def copy_text(self):
+        """Копирование текста в буфер обмена"""
+        clipboard = QApplication.clipboard()
+        # Используем оригинальный текст (markdown), а не HTML
+        clipboard.setText(self.original_text)
+        QMessageBox.information(self, "Успех", "Текст скопирован в буфер обмена!")
+    
+    def sizeHint(self):
+        """Рекомендуемый размер диалога"""
+        return self.minimumSize()
+
+
 class MainWindow(QMainWindow):
     """Главное окно приложения"""
     
@@ -628,14 +755,20 @@ class MainWindow(QMainWindow):
         
         self.results_table.setAlternatingRowColors(True)
         self.results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.results_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        # Двойной клик для открытия результата
+        self.results_table.itemDoubleClicked.connect(self.on_result_double_clicked)
         layout.addWidget(self.results_table)
         
         # Кнопки управления результатами
         results_buttons = QHBoxLayout()
+        self.open_result_btn = QPushButton("Открыть")
+        self.open_result_btn.clicked.connect(self.open_selected_result)
         self.save_results_btn = QPushButton("Сохранить выбранные")
         self.save_results_btn.clicked.connect(self.save_selected_results)
         self.clear_results_btn = QPushButton("Очистить результаты")
         self.clear_results_btn.clicked.connect(self.clear_results)
+        results_buttons.addWidget(self.open_result_btn)
         results_buttons.addWidget(self.save_results_btn)
         results_buttons.addWidget(self.clear_results_btn)
         layout.addLayout(results_buttons)
@@ -1061,7 +1194,46 @@ class MainWindow(QMainWindow):
         """Очистка временной таблицы результатов"""
         self.results_table.setRowCount(0)
         self.temp_results = []
+        self.filtered_results = []
         self.status_bar.showMessage("Результаты очищены")
+    
+    def open_selected_result(self):
+        """Открытие выбранного результата в диалоге markdown"""
+        current_row = self.results_table.currentRow()
+        if current_row < 0:
+            QMessageBox.warning(self, "Предупреждение", "Выберите результат для просмотра!")
+            return
+        
+        self._open_result_at_row(current_row)
+    
+    def on_result_double_clicked(self, item):
+        """Обработка двойного клика по результату"""
+        row = item.row()
+        self._open_result_at_row(row)
+    
+    def _open_result_at_row(self, row: int):
+        """Открытие результата в указанной строке"""
+        if row < 0 or row >= len(self.filtered_results):
+            QMessageBox.warning(self, "Ошибка", "Не удалось найти выбранный результат!")
+            return
+        
+        response = self.filtered_results[row]
+        
+        if not response.success:
+            QMessageBox.warning(
+                self,
+                "Предупреждение",
+                f"Не удалось открыть результат с ошибкой.\n\nОшибка: {response.error or 'Неизвестная ошибка'}"
+            )
+            return
+        
+        # Открываем диалог с форматированным markdown
+        dialog = MarkdownViewDialog(
+            self,
+            model_name=response.model_name,
+            response_text=response.response_text
+        )
+        dialog.exec_()
     
     def export_results(self):
         """Экспорт результатов в файл"""
