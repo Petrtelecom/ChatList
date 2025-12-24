@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QTextEdit, QPushButton, QTableWidget, QTableWidgetItem, QHeaderView,
     QLabel, QComboBox, QProgressBar, QMessageBox, QCheckBox, QSplitter,
     QLineEdit, QMenuBar, QMenu, QStatusBar, QAbstractItemView, QDialog,
-    QDialogButtonBox, QFormLayout, QGroupBox, QFileDialog
+    QDialogButtonBox, QFormLayout, QGroupBox, QFileDialog, QPlainTextEdit
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont
@@ -925,7 +925,7 @@ class MainWindow(QMainWindow):
             model_item = QTableWidgetItem(response.model_name)
             self.results_table.setItem(row, 1, model_item)
             
-            # Ответ
+            # Ответ (многострочное поле)
             if response.success:
                 answer_text = response.response_text
                 if response.error:
@@ -933,9 +933,36 @@ class MainWindow(QMainWindow):
             else:
                 answer_text = f"[ОШИБКА] {response.error}" if response.error else "[Ошибка при получении ответа]"
             
-            answer_item = QTableWidgetItem(answer_text)
-            answer_item.setToolTip(answer_text)  # Подсказка для длинного текста
-            self.results_table.setItem(row, 2, answer_item)
+            # Используем QPlainTextEdit для многострочного отображения
+            answer_widget = QPlainTextEdit()
+            answer_widget.setPlainText(answer_text)
+            answer_widget.setReadOnly(True)
+            answer_widget.setFrameStyle(0)  # Убираем рамку
+            answer_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            answer_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            
+            # Настройка высоты виджета
+            font_metrics = answer_widget.fontMetrics()
+            line_height = font_metrics.lineSpacing()
+            
+            # Подсчитываем примерное количество строк в тексте
+            # Учитываем переносы строк и длину текста
+            lines = answer_text.split('\n')
+            estimated_lines = sum(max(1, len(line) // 80) for line in lines)  # Примерно 80 символов на строку
+            
+            min_height = line_height * 3  # Минимум 3 строки
+            max_height = line_height * 15  # Максимум 15 строк
+            
+            # Вычисляем оптимальную высоту
+            widget_height = min(max(estimated_lines * line_height + 20, min_height), max_height)
+            answer_widget.setMinimumHeight(min_height)
+            answer_widget.setMaximumHeight(widget_height)
+            
+            # Подсветка ошибок
+            if not response.success:
+                answer_widget.setStyleSheet("background-color: #ffebee; color: #c62828;")
+            
+            self.results_table.setCellWidget(row, 2, answer_widget)
             
             # Время ответа
             time_text = f"{response.response_time:.2f}с"
@@ -944,15 +971,24 @@ class MainWindow(QMainWindow):
             time_item = QTableWidgetItem(time_text)
             self.results_table.setItem(row, 3, time_item)
             
-            # Подсветка ошибок
+            # Подсветка ошибок для других колонок
             if not response.success:
-                for col in range(4):
-                    item = self.results_table.item(row, col)
-                    if item:
-                        item.setBackground(Qt.red)
-                        item.setForeground(Qt.white)
+                # Подсветка колонки "Модель"
+                model_item = self.results_table.item(row, 1)
+                if model_item:
+                    model_item.setBackground(Qt.red)
+                    model_item.setForeground(Qt.white)
+                # Подсветка колонки "Время"
+                if time_item:
+                    time_item.setBackground(Qt.red)
+                    time_item.setForeground(Qt.white)
         
+        # Автоматическая настройка высоты строк на основе содержимого
         self.results_table.resizeRowsToContents()
+        
+        # Устанавливаем минимальную высоту строк для многострочных ответов
+        for row in range(self.results_table.rowCount()):
+            self.results_table.setRowHeight(row, max(self.results_table.rowHeight(row), 100))
     
     def on_results_search_changed(self, text):
         """Обработка изменения поискового запроса для результатов"""
