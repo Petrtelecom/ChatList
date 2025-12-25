@@ -23,3 +23,5 @@ MAX_CONCURRENT_REQUESTS = 10
 # Версия схемы базы данных
 DB_VERSION = "1.0"
 
+
+

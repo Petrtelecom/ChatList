@@ -16,15 +16,17 @@ from PyQt5.QtWidgets import (
     QTextEdit, QPushButton, QTableWidget, QTableWidgetItem, QHeaderView,
     QLabel, QComboBox, QProgressBar, QMessageBox, QCheckBox, QSplitter,
     QLineEdit, QMenuBar, QMenu, QStatusBar, QAbstractItemView, QDialog,
-    QDialogButtonBox, QFormLayout, QGroupBox, QFileDialog, QPlainTextEdit
+    QDialogButtonBox, QFormLayout, QGroupBox, QFileDialog, QPlainTextEdit,
+    QStyledItemDelegate, QStyleOptionViewItem, QStyle
 )
-from PyQt5.QtGui import QClipboard
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtGui import QClipboard, QPainter, QFontMetrics
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect
 from PyQt5.QtGui import QFont
 
 import db
 import models
 import network
+import requests
 from config import DATABASE_PATH
 
 # Настройка логирования
@@ -55,6 +57,141 @@ def setup_logging():
 logger = setup_logging()
 
 
+class ModelComboBoxDelegate(QStyledItemDelegate):
+    """Делегат для отображения моделей в QComboBox с двумя столбцами: название и стоимость"""
+    
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index):
+        """Отрисовка элемента с двумя столбцами"""
+        # Рисуем фон
+        if option.state & QStyle.State_Selected:
+            painter.fillRect(option.rect, option.palette.highlight())
+        
+        # Получаем данные модели
+        model_data = index.data(Qt.UserRole)
+        if not model_data:
+            # Если нет данных модели, отображаем обычный текст
+            super().paint(painter, option, index)
+            return
+        
+        model_name = model_data.get('name', '')
+        model_id = model_data.get('id', '')
+        pricing = model_data.get('pricing', 'не указана')
+        
+        # Формируем текст для отображения
+        name_text = f"{model_name} ({model_id})"
+        
+        # Определяем цвета
+        if option.state & QStyle.State_Selected:
+            text_color = option.palette.highlightedText().color()
+        else:
+            text_color = option.palette.text().color()
+        
+        painter.setPen(text_color)
+        
+        # Вычисляем размеры
+        rect = option.rect
+        padding = 5
+        font_metrics = painter.fontMetrics()
+        
+        # Рисуем название слева
+        name_rect = QRect(rect.left() + padding, rect.top(), 
+                         rect.width() // 2, rect.height())
+        painter.drawText(name_rect, Qt.AlignLeft | Qt.AlignVCenter, name_text)
+        
+        # Рисуем стоимость справа (серым цветом)
+        pricing_color = text_color
+        if not (option.state & QStyle.State_Selected):
+            pricing_color = text_color.darker(150)  # Чуть темнее для выделения
+        
+        painter.setPen(pricing_color)
+        pricing_rect = QRect(rect.left() + rect.width() // 2, rect.top(),
+                            rect.width() // 2 - padding, rect.height())
+        painter.drawText(pricing_rect, Qt.AlignRight | Qt.AlignVCenter, pricing)
+    
+    def sizeHint(self, option: QStyleOptionViewItem, index):
+        """Вычисление размера элемента"""
+        base_size = super().sizeHint(option, index)
+        # Увеличиваем ширину для двух столбцов
+        return base_size
+
+
+def get_openrouter_models() -> List[Dict]:
+    """Получение списка доступных моделей из OpenRouter API"""
+    try:
+        logger.info("Запрос списка моделей к OpenRouter API...")
+        response = requests.get("https://openrouter.ai/api/v1/models", timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        logger.info(f"Получен ответ от API, статус: {response.status_code}")
+        
+        models_data = data.get("data", [])
+        logger.info(f"Количество моделей в ответе: {len(models_data)}")
+        
+        if not models_data:
+            logger.warning("Ответ API не содержит данных о моделях")
+            return []
+        
+        models_list = []
+        for model_data in models_data:
+            model_id = model_data.get("id", "")
+            if not model_id:
+                continue
+                
+            pricing = model_data.get("pricing", {})
+            
+            # Формируем информацию о стоимости
+            pricing_info = "не указана"
+            if pricing:
+                prompt_price = pricing.get("prompt")
+                completion_price = pricing.get("completion")
+                if prompt_price is not None or completion_price is not None:
+                    # Преобразуем цены в числа, если они строки
+                    try:
+                        prompt_price_float = float(prompt_price) if prompt_price is not None else None
+                        completion_price_float = float(completion_price) if completion_price is not None else None
+                        
+                        prompt_str = f"${prompt_price_float:.6f}".rstrip('0').rstrip('.') if prompt_price_float is not None else "не указана"
+                        completion_str = f"${completion_price_float:.6f}".rstrip('0').rstrip('.') if completion_price_float is not None else "не указана"
+                        pricing_info = f"Вход: {prompt_str}/1M токенов, Выход: {completion_str}/1M токенов"
+                    except (ValueError, TypeError):
+                        # Если не удалось преобразовать, используем значения как есть
+                        prompt_str = str(prompt_price) if prompt_price is not None else "не указана"
+                        completion_str = str(completion_price) if completion_price is not None else "не указана"
+                        pricing_info = f"Вход: ${prompt_str}/1M токенов, Выход: ${completion_str}/1M токенов"
+            
+            # Сохраняем исходные числовые значения цен для фильтрации
+            prompt_price_num = None
+            completion_price_num = None
+            if pricing:
+                try:
+                    prompt_price = pricing.get("prompt")
+                    completion_price = pricing.get("completion")
+                    prompt_price_num = float(prompt_price) if prompt_price is not None else None
+                    completion_price_num = float(completion_price) if completion_price is not None else None
+                except (ValueError, TypeError):
+                    pass
+            
+            models_list.append({
+                "id": model_id,
+                "name": model_data.get("name", model_id),
+                "pricing": pricing_info,
+                "pricing_prompt": prompt_price_num,  # Числовое значение входной цены
+                "pricing_completion": completion_price_num,  # Числовое значение выходной цены
+                "context_length": model_data.get("context_length", 0),
+                "architecture": model_data.get("architecture", {}),
+            })
+        
+        sorted_models = sorted(models_list, key=lambda x: x["name"])
+        logger.info(f"Обработано {len(sorted_models)} моделей")
+        return sorted_models
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Ошибка сети при получении списка моделей OpenRouter: {e}")
+        return []
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка моделей OpenRouter: {e}", exc_info=True)
+        return []
+
+
 class RequestThread(QThread):
     """Поток для выполнения запросов к API"""
     progress = pyqtSignal(int, int)  # completed, total
@@ -81,9 +218,14 @@ class RequestThread(QThread):
 class ModelEditDialog(QDialog):
     """Диалог для добавления/редактирования модели"""
     
+    # Классовые переменные для сохранения настроек фильтрации
+    _last_name_filter: str = ""
+    _last_pricing_filter: str = ""
+    
     def __init__(self, parent=None, model_data: Optional[Dict] = None):
         super().__init__(parent)
         self.model_data = model_data
+        self.openrouter_models: List[Dict] = []
         self.setWindowTitle("Редактировать модель" if model_data else "Добавить модель")
         self.setModal(True)
         self.init_ui()
@@ -119,7 +261,40 @@ class ModelEditDialog(QDialog):
         # Тип модели
         self.model_type_combo = QComboBox()
         self.model_type_combo.addItems(["openrouter", "openai", "deepseek", "groq", "anthropic"])
+        self.model_type_combo.currentTextChanged.connect(self.on_model_type_changed)
         form_layout.addRow("Тип модели:", self.model_type_combo)
+        
+        # Фильтры для моделей OpenRouter (только для типа openrouter)
+        self.model_name_filter_input = QLineEdit()
+        self.model_name_filter_input.setPlaceholderText("Фильтр по названию модели...")
+        self.model_name_filter_input.setVisible(False)
+        # Восстанавливаем последнее значение фильтра
+        self.model_name_filter_input.setText(ModelEditDialog._last_name_filter)
+        self.model_name_filter_input.textChanged.connect(self.apply_model_filters)
+        form_layout.addRow("Фильтр по названию:", self.model_name_filter_input)
+        
+        self.model_pricing_filter_input = QLineEdit()
+        self.model_pricing_filter_input.setPlaceholderText("Фильтр по стоимости (например: $0.001, <$1, >$0)")
+        self.model_pricing_filter_input.setVisible(False)
+        # Восстанавливаем последнее значение фильтра
+        self.model_pricing_filter_input.setText(ModelEditDialog._last_pricing_filter)
+        self.model_pricing_filter_input.textChanged.connect(self.apply_model_filters)
+        form_layout.addRow("Фильтр по стоимости:", self.model_pricing_filter_input)
+        
+        # Выбор модели из OpenRouter (только для типа openrouter)
+        self.model_select_combo = QComboBox()
+        self.model_select_combo.setVisible(False)
+        self.model_select_combo.setItemDelegate(ModelComboBoxDelegate(self.model_select_combo))
+        self.model_select_combo.setMinimumWidth(600)  # Увеличиваем ширину для отображения двух столбцов
+        self.model_select_combo.currentIndexChanged.connect(self.on_openrouter_model_selected)
+        self.model_select_combo.addItem("Загрузка моделей...", None)
+        form_layout.addRow("Выберите модель:", self.model_select_combo)
+        
+        # Стоимость модели (только для чтения)
+        self.pricing_label = QLabel("Стоимость: не указана")
+        self.pricing_label.setVisible(False)
+        self.pricing_label.setStyleSheet("color: #0066cc; font-weight: bold;")
+        form_layout.addRow("Стоимость:", self.pricing_label)
         
         # Активна
         self.is_active_checkbox = QCheckBox("Модель активна")
@@ -133,7 +308,7 @@ class ModelEditDialog(QDialog):
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel
         )
         buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        buttons.rejected.connect(self.on_reject)
         layout.addWidget(buttons)
         
         # Подсказка для OpenRouter
@@ -144,20 +319,240 @@ class ModelEditDialog(QDialog):
         hint_label.setWordWrap(True)
         hint_label.setStyleSheet("color: gray; font-size: 9pt;")
         layout.addWidget(hint_label)
+        
+        # Инициализация состояния для текущего типа модели
+        self.on_model_type_changed(self.model_type_combo.currentText())
     
     def load_model_data(self):
         """Загрузка данных модели в форму"""
         if self.model_data:
-            self.name_input.setText(self.model_data.get("name", ""))
-            self.api_url_input.setText(self.model_data.get("api_url", ""))
-            self.api_id_input.setText(self.model_data.get("api_id", ""))
-            
             model_type = self.model_data.get("model_type", "openrouter")
             index = self.model_type_combo.findText(model_type)
             if index >= 0:
                 self.model_type_combo.setCurrentIndex(index)
             
+            # Загружаем модели OpenRouter если тип openrouter
+            if model_type == "openrouter":
+                self.load_openrouter_models()
+            
+            self.name_input.setText(self.model_data.get("name", ""))
+            self.api_url_input.setText(self.model_data.get("api_url", ""))
+            self.api_id_input.setText(self.model_data.get("api_id", ""))
+            
+            # Если модель OpenRouter, пытаемся найти её в списке и показать стоимость
+            if model_type == "openrouter" and self.openrouter_models:
+                model_name = self.model_data.get("name", "")
+                for idx, model in enumerate(self.openrouter_models):
+                    if model["id"] == model_name:
+                        self.model_select_combo.setCurrentIndex(idx)
+                        break
+            
             self.is_active_checkbox.setChecked(bool(self.model_data.get("is_active", 1)))
+            self.on_model_type_changed(model_type)
+    
+    def load_openrouter_models(self):
+        """Загрузка списка моделей OpenRouter"""
+        try:
+            logger.info("Начинаю загрузку моделей OpenRouter...")
+            self.openrouter_models = get_openrouter_models()
+            logger.info(f"Загружено моделей: {len(self.openrouter_models)}")
+            
+            if not self.openrouter_models:
+                logger.warning("Список моделей OpenRouter пуст")
+                QMessageBox.warning(
+                    self,
+                    "Предупреждение",
+                    "Не удалось загрузить список моделей OpenRouter.\n"
+                    "Проверьте подключение к интернету.\n"
+                    "Вы можете ввести название модели вручную."
+                )
+                return
+            
+            # После загрузки применяем фильтры для отображения
+            self.apply_model_filters()
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке моделей OpenRouter: {e}", exc_info=True)
+            QMessageBox.warning(
+                self,
+                "Предупреждение",
+                f"Не удалось загрузить список моделей OpenRouter: {str(e)}\n"
+                "Проверьте подключение к интернету.\n"
+                "Вы можете ввести название модели вручную."
+            )
+    
+    def on_model_type_changed(self, model_type: str):
+        """Обработка изменения типа модели"""
+        is_openrouter = model_type == "openrouter"
+        self.model_select_combo.setVisible(is_openrouter)
+        self.pricing_label.setVisible(is_openrouter)
+        self.model_name_filter_input.setVisible(is_openrouter)
+        self.model_pricing_filter_input.setVisible(is_openrouter)
+        
+        if is_openrouter:
+            # Если список моделей еще не загружен, загружаем его
+            if not self.openrouter_models:
+                logger.info("Загрузка моделей OpenRouter при изменении типа на openrouter")
+                self.load_openrouter_models()
+            else:
+                # Если модели уже загружены, убеждаемся что они отображены
+                logger.info(f"Модели OpenRouter уже загружены: {len(self.openrouter_models)} моделей")
+                self.apply_model_filters()  # Применяем фильтры при переключении
+        
+        # Автоматически заполняем API URL и API ID для openrouter только если поля пустые
+        if is_openrouter:
+            if not self.api_url_input.text().strip():
+                self.api_url_input.setText("https://openrouter.ai/api/v1/chat/completions")
+            if not self.api_id_input.text().strip():
+                self.api_id_input.setText("OPENROUTER_API_KEY")
+    
+    def on_openrouter_model_selected(self, index: int):
+        """Обработка выбора модели из списка OpenRouter"""
+        if index < 0:
+            return
+        
+        model_data = self.model_select_combo.itemData(index)
+        if model_data:
+            # Сохраняем текущие значения фильтров
+            ModelEditDialog._last_name_filter = self.model_name_filter_input.text()
+            ModelEditDialog._last_pricing_filter = self.model_pricing_filter_input.text()
+            
+            # Заполняем название модели
+            self.name_input.setText(model_data["id"])
+            
+            # Отображаем стоимость
+            pricing_text = model_data.get("pricing", "не указана")
+            self.pricing_label.setText(f"Стоимость: {pricing_text}")
+            
+            # Заполняем API URL и API ID
+            self.api_url_input.setText("https://openrouter.ai/api/v1/chat/completions")
+            self.api_id_input.setText("OPENROUTER_API_KEY")
+    
+    def apply_model_filters(self):
+        """Применение фильтров к списку моделей OpenRouter"""
+        if not self.openrouter_models:
+            return
+        
+        # Получаем фильтры
+        name_filter = self.model_name_filter_input.text().strip().lower()
+        pricing_filter = self.model_pricing_filter_input.text().strip().lower()
+        
+        # Фильтруем модели
+        filtered_models = []
+        for model in self.openrouter_models:
+            # Фильтр по названию - проверяем, что все слова из фильтра присутствуют
+            if name_filter:
+                model_name = model.get('name', '').lower()
+                model_id = model.get('id', '').lower()
+                # Разбиваем фильтр на слова
+                filter_words = name_filter.split()
+                # Проверяем, что все слова присутствуют либо в названии, либо в ID
+                all_words_found = all(
+                    word in model_name or word in model_id
+                    for word in filter_words
+                )
+                if not all_words_found:
+                    continue
+            
+            # Фильтр по стоимости
+            if pricing_filter:
+                if not self._check_pricing_filter(pricing_filter, model):
+                    continue
+            
+            filtered_models.append(model)
+        
+        # Обновляем список в комбобоксе
+        self.model_select_combo.clear()
+        if filtered_models:
+            for model in filtered_models:
+                display_name = f"{model['name']} ({model['id']})"
+                self.model_select_combo.addItem(display_name, model)
+            logger.info(f"Отфильтровано моделей: {len(filtered_models)} из {len(self.openrouter_models)}")
+        else:
+            self.model_select_combo.addItem("Нет моделей, соответствующих фильтрам", None)
+    
+    def _check_pricing_filter(self, filter_text: str, model: Dict) -> bool:
+        """Проверка соответствия модели фильтру стоимости"""
+        if not filter_text:
+            return True
+        
+        # Получаем числовые значения цен из модели (если доступны)
+        prompt_price = model.get('pricing_prompt')
+        completion_price = model.get('pricing_completion')
+        
+        # Если числовые значения недоступны, пытаемся извлечь из текста
+        if prompt_price is None and completion_price is None:
+            pricing_text = model.get('pricing', 'не указана').lower()
+            if filter_text in ['0', 'free', 'бесплатно', 'не указана', 'н/д']:
+                return 'не указана' in pricing_text or '0' in pricing_text
+            # Если нет числовых значений, делаем текстовый поиск
+            return filter_text in pricing_text
+        
+        # Парсим фильтр
+        filter_value = None
+        filter_operator = None
+        
+        # Проверяем операторы сравнения
+        filter_text_clean = filter_text.strip()
+        if filter_text_clean.startswith('<='):
+            filter_operator = '<='
+            try:
+                filter_value = float(filter_text_clean[2:].replace('$', '').strip())
+            except ValueError:
+                return True  # Неверный формат - показываем все
+        elif filter_text_clean.startswith('>='):
+            filter_operator = '>='
+            try:
+                filter_value = float(filter_text_clean[2:].replace('$', '').strip())
+            except ValueError:
+                return True
+        elif filter_text_clean.startswith('<'):
+            filter_operator = '<'
+            try:
+                filter_value = float(filter_text_clean[1:].replace('$', '').strip())
+            except ValueError:
+                return True
+        elif filter_text_clean.startswith('>'):
+            filter_operator = '>'
+            try:
+                filter_value = float(filter_text_clean[1:].replace('$', '').strip())
+            except ValueError:
+                return True
+        else:
+            # Просто число - проверяем, меньше или равно максимальной цене
+            try:
+                filter_value = float(filter_text_clean.replace('$', '').strip())
+                filter_operator = '<='
+            except ValueError:
+                # Текстовый поиск
+                pricing_text = model.get('pricing', '').lower()
+                return filter_text.lower() in pricing_text
+        
+        if filter_value is None:
+            return True
+        
+        # Берем максимальную цену из входной и выходной
+        prices = []
+        if prompt_price is not None:
+            prices.append(prompt_price)
+        if completion_price is not None:
+            prices.append(completion_price)
+        
+        if not prices:
+            return False
+        
+        max_price = max(prices)
+        
+        # Выполняем сравнение
+        if filter_operator == '<=':
+            return max_price <= filter_value
+        elif filter_operator == '>=':
+            return max_price >= filter_value
+        elif filter_operator == '<':
+            return max_price < filter_value
+        elif filter_operator == '>':
+            return max_price > filter_value
+        
+        return False
     
     def get_model_data(self) -> Dict:
         """Получение данных модели из формы"""
@@ -171,6 +566,10 @@ class ModelEditDialog(QDialog):
     
     def accept(self):
         """Валидация перед принятием"""
+        # Сохраняем текущие значения фильтров перед закрытием
+        ModelEditDialog._last_name_filter = self.model_name_filter_input.text()
+        ModelEditDialog._last_pricing_filter = self.model_pricing_filter_input.text()
+        
         data = self.get_model_data()
         
         if not data["name"]:
@@ -186,6 +585,13 @@ class ModelEditDialog(QDialog):
             return
         
         super().accept()
+    
+    def on_reject(self):
+        """Сохранение фильтров перед отклонением диалога"""
+        # Сохраняем текущие значения фильтров перед закрытием
+        ModelEditDialog._last_name_filter = self.model_name_filter_input.text()
+        ModelEditDialog._last_pricing_filter = self.model_pricing_filter_input.text()
+        self.reject()
 
 
 class ModelManagementDialog(QDialog):
@@ -197,6 +603,7 @@ class ModelManagementDialog(QDialog):
         self.setModal(True)
         self.setMinimumSize(900, 600)
         self.model_manager = models.get_model_manager()
+        self.all_models: List[models.Model] = []  # Все модели для фильтрации
         self.init_ui()
         self.load_models()
     
@@ -204,6 +611,27 @@ class ModelManagementDialog(QDialog):
         """Инициализация интерфейса"""
         layout = QVBoxLayout()
         self.setLayout(layout)
+        
+        # Поиск и сортировка
+        search_sort_layout = QHBoxLayout()
+        search_sort_layout.addWidget(QLabel("Поиск:"))
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Поиск по всем полям...")
+        self.search_input.textChanged.connect(self.on_search_changed)
+        search_sort_layout.addWidget(self.search_input)
+        
+        search_sort_layout.addWidget(QLabel("Сортировка:"))
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems([
+            "По умолчанию", 
+            "По ID", 
+            "По названию", 
+            "По типу", 
+            "По активности"
+        ])
+        self.sort_combo.currentIndexChanged.connect(self.on_sort_changed)
+        search_sort_layout.addWidget(self.sort_combo)
+        layout.addLayout(search_sort_layout)
         
         # Таблица моделей
         self.models_table = QTableWidget()
@@ -255,10 +683,41 @@ class ModelManagementDialog(QDialog):
     
     def load_models(self):
         """Загрузка списка моделей в таблицу"""
-        models_list = self.model_manager.load_models(force_reload=True)
-        self.models_table.setRowCount(len(models_list))
+        self.all_models = self.model_manager.load_models(force_reload=True)
+        self.apply_filter_and_sort()
+    
+    def apply_filter_and_sort(self):
+        """Применение фильтра и сортировки к списку моделей"""
+        # Фильтрация
+        search_text = self.search_input.text().strip().lower()
+        filtered_models = self.all_models
         
-        for row, model in enumerate(models_list):
+        if search_text:
+            filtered_models = [
+                model for model in self.all_models
+                if (search_text in str(model.id).lower() or
+                    search_text in model.name.lower() or
+                    search_text in (model.api_url or "").lower() or
+                    search_text in (model.api_id or "").lower() or
+                    search_text in (model.model_type or "").lower() or
+                    search_text in ("да" if model.is_active else "нет"))
+            ]
+        
+        # Сортировка
+        sort_option = self.sort_combo.currentText()
+        if sort_option == "По ID":
+            filtered_models = sorted(filtered_models, key=lambda m: m.id)
+        elif sort_option == "По названию":
+            filtered_models = sorted(filtered_models, key=lambda m: m.name.lower())
+        elif sort_option == "По типу":
+            filtered_models = sorted(filtered_models, key=lambda m: (m.model_type or "").lower())
+        elif sort_option == "По активности":
+            filtered_models = sorted(filtered_models, key=lambda m: (not m.is_active, m.name.lower()))
+        
+        # Отображение в таблице
+        self.models_table.setRowCount(len(filtered_models))
+        
+        for row, model in enumerate(filtered_models):
             # ID
             id_item = QTableWidgetItem(str(model.id))
             id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
@@ -294,13 +753,27 @@ class ModelManagementDialog(QDialog):
         
         self.models_table.resizeRowsToContents()
     
+    def on_search_changed(self, text):
+        """Обработка изменения поискового запроса"""
+        self.apply_filter_and_sort()
+    
+    def on_sort_changed(self, index):
+        """Обработка изменения сортировки"""
+        self.apply_filter_and_sort()
+    
     def on_active_changed(self, model_id: int, state: int):
         """Обработка изменения статуса активности"""
         is_active = 1 if state == Qt.Checked else 0
         try:
             db.update_model_status(model_id, is_active)
             self.model_manager.invalidate_cache()
+            # Обновляем статус в локальном списке
+            for model in self.all_models:
+                if model.id == model_id:
+                    model.is_active = bool(is_active)
+                    break
             logger.info(f"Статус модели {model_id} изменен на {'активна' if is_active else 'неактивна'}")
+            self.apply_filter_and_sort()  # Обновляем отображение с учетом фильтров
         except Exception as e:
             logger.error(f"Ошибка при изменении статуса модели: {e}")
             QMessageBox.critical(self, "Ошибка", f"Не удалось изменить статус модели: {str(e)}")
@@ -567,7 +1040,6 @@ class MainWindow(QMainWindow):
         
         self.init_ui()
         self.load_prompts()
-        self.load_models()
     
     def init_ui(self):
         """Инициализация интерфейса"""
@@ -584,16 +1056,16 @@ class MainWindow(QMainWindow):
         self.create_menu_bar()
         
         # Разделитель для основных областей
-        splitter = QSplitter(Qt.Horizontal)
+        splitter = QSplitter(Qt.Vertical)
         main_layout.addWidget(splitter)
         
-        # Левая панель: работа с промтами
-        left_panel = self.create_prompt_panel()
-        splitter.addWidget(left_panel)
+        # Верхняя панель: работа с промтами
+        prompt_panel = self.create_prompt_panel()
+        splitter.addWidget(prompt_panel)
         
-        # Правая панель: результаты
-        right_panel = self.create_results_panel()
-        splitter.addWidget(right_panel)
+        # Нижняя панель: результаты
+        results_panel = self.create_results_panel()
+        splitter.addWidget(results_panel)
         
         # Настройка пропорций разделителя
         splitter.setStretchFactor(0, 1)
@@ -683,14 +1155,6 @@ class MainWindow(QMainWindow):
         prompt_buttons.addWidget(self.new_prompt_btn)
         prompt_buttons.addWidget(self.save_prompt_btn)
         layout.addLayout(prompt_buttons)
-        
-        # Выбор моделей
-        models_label = QLabel("Активные модели:")
-        layout.addWidget(models_label)
-        self.models_list_widget = QWidget()
-        models_layout = QVBoxLayout()
-        self.models_list_widget.setLayout(models_layout)
-        layout.addWidget(self.models_list_widget)
         
         # Кнопки управления запросами
         request_buttons = QHBoxLayout()
@@ -805,42 +1269,6 @@ class MainWindow(QMainWindow):
         self.prompt_search_input.clear()
         self.filter_prompts()
     
-    def load_models(self):
-        """Загрузка списка моделей и создание чекбоксов"""
-        # Очистка существующих чекбоксов
-        layout = self.models_list_widget.layout()
-        while layout.count():
-            item = layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        
-        # Загрузка моделей
-        all_models = self.model_manager.load_models()
-        self.model_checkboxes: Dict[int, QCheckBox] = {}
-        
-        for model in all_models:
-            checkbox = QCheckBox(model.get_display_name())
-            checkbox.setChecked(model.is_active)
-            checkbox.stateChanged.connect(self.on_model_checkbox_changed)
-            self.model_checkboxes[model.id] = checkbox
-            layout.addWidget(checkbox)
-    
-    def on_model_checkbox_changed(self, state):
-        """Обработка изменения состояния чекбокса модели"""
-        # Обновление статуса модели в БД
-        checkbox = self.sender()
-        model_id = None
-        for mid, cb in self.model_checkboxes.items():
-            if cb == checkbox:
-                model_id = mid
-                break
-        
-        if model_id:
-            is_active = 1 if state == Qt.Checked else 0
-            db.update_model_status(model_id, is_active)
-            self.model_manager.invalidate_cache()
-            logger.info(f"Статус модели {model_id} изменен на {'активна' if is_active else 'неактивна'}")
-    
     def on_prompt_selected(self, index):
         """Обработка выбора промта из списка"""
         prompt_id = self.prompt_combo.itemData(index)
@@ -897,17 +1325,12 @@ class MainWindow(QMainWindow):
             logger.warning("Попытка отправить пустой промт")
             return
         
-        # Получение выбранных моделей
-        selected_models = []
-        for model_id, checkbox in self.model_checkboxes.items():
-            if checkbox.isChecked():
-                model = self.model_manager.get_model_by_id(model_id)
-                if model:
-                    selected_models.append(model)
+        # Получение активных моделей
+        selected_models = self.model_manager.get_active_models()
         
         if not selected_models:
-            QMessageBox.warning(self, "Предупреждение", "Выберите хотя бы одну модель!")
-            logger.warning("Попытка отправить запрос без выбранных моделей")
+            QMessageBox.warning(self, "Предупреждение", "Нет активных моделей! Выберите активные модели в меню управления.")
+            logger.warning("Попытка отправить запрос без активных моделей")
             return
         
         # Валидация API-ключей
@@ -1369,9 +1792,8 @@ class MainWindow(QMainWindow):
         """Управление моделями"""
         dialog = ModelManagementDialog(self)
         if dialog.exec_() == QDialog.Accepted:
-            # Обновление списка моделей в главном окне после изменений
+            # Обновление кэша моделей после изменений
             self.model_manager.invalidate_cache()
-            self.load_models()
     
     def show_about(self):
         """Показать информацию о программе"""
