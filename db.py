@@ -251,6 +251,29 @@ def update_prompt_tags(prompt_id: int, tags: Optional[str]) -> bool:
         conn.close()
 
 
+def update_prompt(prompt_id: int, prompt_text: str, tags: Optional[str] = None) -> bool:
+    """Обновление промта (текст и теги)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            UPDATE prompts
+            SET prompt = ?, tags = ?
+            WHERE id = ?
+        """, (prompt_text, tags, prompt_id))
+        conn.commit()
+        updated = cursor.rowcount > 0
+        if updated:
+            logger.info(f"Обновлен промт с ID: {prompt_id}")
+        return updated
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при обновлении промта: {e}")
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def delete_prompt(prompt_id: int) -> bool:
     """Удаление промта (CASCADE удалит связанные results)"""
     conn = get_connection()

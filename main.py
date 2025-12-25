@@ -594,6 +594,330 @@ class ModelEditDialog(QDialog):
         self.reject()
 
 
+class PromptEditDialog(QDialog):
+    """Диалог для добавления/редактирования промта"""
+    
+    def __init__(self, parent=None, prompt_data: Optional[Dict] = None):
+        super().__init__(parent)
+        self.prompt_data = prompt_data
+        self.setWindowTitle("Редактировать промт" if prompt_data else "Добавить промт")
+        self.setModal(True)
+        self.init_ui()
+        
+        if prompt_data:
+            self.load_prompt_data()
+    
+    def init_ui(self):
+        """Инициализация интерфейса диалога"""
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        
+        # Форма
+        form_group = QGroupBox("Параметры промта")
+        form_layout = QFormLayout()
+        form_group.setLayout(form_layout)
+        
+        # Текст промта
+        self.prompt_input = QTextEdit()
+        self.prompt_input.setPlaceholderText("Введите текст промта...")
+        self.prompt_input.setMinimumHeight(200)
+        form_layout.addRow("Текст промта:", self.prompt_input)
+        
+        # Теги
+        self.tags_input = QLineEdit()
+        self.tags_input.setPlaceholderText("тег1, тег2, ...")
+        form_layout.addRow("Теги:", self.tags_input)
+        
+        layout.addWidget(form_group)
+        
+        # Кнопки
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def load_prompt_data(self):
+        """Загрузка данных промта в форму"""
+        if self.prompt_data:
+            self.prompt_input.setPlainText(self.prompt_data.get("prompt", ""))
+            self.tags_input.setText(self.prompt_data.get("tags", "") or "")
+    
+    def get_prompt_data(self) -> Dict:
+        """Получение данных промта из формы"""
+        return {
+            "prompt": self.prompt_input.toPlainText().strip(),
+            "tags": self.tags_input.text().strip() or None
+        }
+    
+    def accept(self):
+        """Валидация перед принятием"""
+        data = self.get_prompt_data()
+        
+        if not data["prompt"]:
+            QMessageBox.warning(self, "Ошибка", "Текст промта не может быть пустым!")
+            return
+        
+        super().accept()
+
+
+class PromptManagementDialog(QDialog):
+    """Диалог для управления промтами"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Управление промтами")
+        self.setModal(True)
+        self.setMinimumSize(1000, 600)
+        self.all_prompts: List[Dict] = []  # Все промты для фильтрации
+        self.init_ui()
+        self.load_prompts()
+    
+    def init_ui(self):
+        """Инициализация интерфейса"""
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        
+        # Поиск и сортировка
+        search_sort_layout = QHBoxLayout()
+        search_sort_layout.addWidget(QLabel("Поиск:"))
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Поиск по тексту и тегам...")
+        self.search_input.textChanged.connect(self.on_search_changed)
+        search_sort_layout.addWidget(self.search_input)
+        
+        search_sort_layout.addWidget(QLabel("Сортировка:"))
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems([
+            "По умолчанию", 
+            "По ID", 
+            "По дате", 
+            "По тексту"
+        ])
+        self.sort_combo.currentIndexChanged.connect(self.on_sort_changed)
+        search_sort_layout.addWidget(self.sort_combo)
+        layout.addLayout(search_sort_layout)
+        
+        # Таблица промтов
+        self.prompts_table = QTableWidget()
+        self.prompts_table.setColumnCount(4)
+        self.prompts_table.setHorizontalHeaderLabels([
+            "ID", "Дата", "Промт (превью)", "Теги"
+        ])
+        
+        # Настройка таблицы
+        header = self.prompts_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # ID
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # Дата
+        header.setSectionResizeMode(2, QHeaderView.Stretch)  # Промт
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Теги
+        
+        self.prompts_table.setAlternatingRowColors(True)
+        self.prompts_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.prompts_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        layout.addWidget(self.prompts_table)
+        
+        # Кнопки управления
+        buttons_layout = QHBoxLayout()
+        
+        self.add_btn = QPushButton("Добавить")
+        self.add_btn.clicked.connect(self.add_prompt)
+        buttons_layout.addWidget(self.add_btn)
+        
+        self.edit_btn = QPushButton("Редактировать")
+        self.edit_btn.clicked.connect(self.edit_prompt)
+        buttons_layout.addWidget(self.edit_btn)
+        
+        self.delete_btn = QPushButton("Удалить")
+        self.delete_btn.clicked.connect(self.delete_prompt)
+        buttons_layout.addWidget(self.delete_btn)
+        
+        buttons_layout.addStretch()
+        
+        self.refresh_btn = QPushButton("Обновить")
+        self.refresh_btn.clicked.connect(self.load_prompts)
+        buttons_layout.addWidget(self.refresh_btn)
+        
+        close_btn = QPushButton("Закрыть")
+        close_btn.clicked.connect(self.accept)
+        buttons_layout.addWidget(close_btn)
+        
+        layout.addLayout(buttons_layout)
+    
+    def load_prompts(self):
+        """Загрузка списка промтов в таблицу"""
+        self.all_prompts = db.get_all_prompts()
+        self.apply_filter_and_sort()
+    
+    def apply_filter_and_sort(self):
+        """Применение фильтра и сортировки к списку промтов"""
+        # Фильтрация
+        search_text = self.search_input.text().strip().lower()
+        filtered_prompts = self.all_prompts
+        
+        if search_text:
+            filtered_prompts = [
+                prompt for prompt in self.all_prompts
+                if (search_text in str(prompt.get("id", "")).lower() or
+                    search_text in (prompt.get("prompt", "") or "").lower() or
+                    search_text in (prompt.get("tags", "") or "").lower() or
+                    search_text in str(prompt.get("date", "")).lower())
+            ]
+        
+        # Сортировка
+        sort_option = self.sort_combo.currentText()
+        if sort_option == "По ID":
+            filtered_prompts = sorted(filtered_prompts, key=lambda p: p.get("id", 0))
+        elif sort_option == "По дате":
+            filtered_prompts = sorted(filtered_prompts, key=lambda p: p.get("date", ""), reverse=True)
+        elif sort_option == "По тексту":
+            filtered_prompts = sorted(filtered_prompts, key=lambda p: (p.get("prompt", "") or "").lower())
+        
+        # Отображение в таблице
+        self.prompts_table.setRowCount(len(filtered_prompts))
+        
+        for row, prompt in enumerate(filtered_prompts):
+            # ID
+            id_item = QTableWidgetItem(str(prompt.get("id", "")))
+            id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
+            self.prompts_table.setItem(row, 0, id_item)
+            
+            # Дата
+            date_value = prompt.get("date", "")
+            if date_value:
+                # Форматируем дату для отображения
+                try:
+                    if isinstance(date_value, str):
+                        # Пытаемся преобразовать строку даты
+                        date_obj = datetime.strptime(date_value, "%Y-%m-%d %H:%M:%S")
+                        date_str = date_obj.strftime("%Y-%m-%d %H:%M")
+                    else:
+                        date_str = str(date_value)
+                except:
+                    date_str = str(date_value)
+            else:
+                date_str = ""
+            date_item = QTableWidgetItem(date_str)
+            date_item.setFlags(date_item.flags() & ~Qt.ItemIsEditable)
+            self.prompts_table.setItem(row, 1, date_item)
+            
+            # Промт (превью)
+            prompt_text = prompt.get("prompt", "") or ""
+            # Ограничиваем длину для превью
+            preview_text = prompt_text[:100] + "..." if len(prompt_text) > 100 else prompt_text
+            prompt_item = QTableWidgetItem(preview_text)
+            prompt_item.setFlags(prompt_item.flags() & ~Qt.ItemIsEditable)
+            # Добавляем полный текст в tooltip
+            prompt_item.setToolTip(prompt_text)
+            self.prompts_table.setItem(row, 2, prompt_item)
+            
+            # Теги
+            tags_item = QTableWidgetItem(prompt.get("tags", "") or "")
+            tags_item.setFlags(tags_item.flags() & ~Qt.ItemIsEditable)
+            self.prompts_table.setItem(row, 3, tags_item)
+        
+        self.prompts_table.resizeRowsToContents()
+    
+    def on_search_changed(self, text):
+        """Обработка изменения поискового запроса"""
+        self.apply_filter_and_sort()
+    
+    def on_sort_changed(self, index):
+        """Обработка изменения сортировки"""
+        self.apply_filter_and_sort()
+    
+    def get_selected_prompt_id(self) -> Optional[int]:
+        """Получить ID выбранного промта"""
+        current_row = self.prompts_table.currentRow()
+        if current_row < 0:
+            return None
+        id_item = self.prompts_table.item(current_row, 0)
+        if id_item:
+            return int(id_item.text())
+        return None
+    
+    def add_prompt(self):
+        """Добавление нового промта"""
+        dialog = PromptEditDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            data = dialog.get_prompt_data()
+            try:
+                prompt_id = db.create_prompt(data["prompt"], data["tags"])
+                self.load_prompts()
+                QMessageBox.information(self, "Успех", "Промт успешно добавлен!")
+                logger.info(f"Добавлен промт с ID: {prompt_id}")
+            except Exception as e:
+                logger.error(f"Ошибка при добавлении промта: {e}")
+                QMessageBox.critical(self, "Ошибка", f"Не удалось добавить промт: {str(e)}")
+    
+    def edit_prompt(self):
+        """Редактирование выбранного промта"""
+        prompt_id = self.get_selected_prompt_id()
+        if not prompt_id:
+            QMessageBox.warning(self, "Предупреждение", "Выберите промт для редактирования!")
+            return
+        
+        prompt_data = db.get_prompt_by_id(prompt_id)
+        if not prompt_data:
+            QMessageBox.warning(self, "Ошибка", "Промт не найден!")
+            return
+        
+        dialog = PromptEditDialog(self, prompt_data)
+        if dialog.exec_() == QDialog.Accepted:
+            data = dialog.get_prompt_data()
+            try:
+                db.update_prompt(prompt_id, data["prompt"], data["tags"])
+                self.load_prompts()
+                QMessageBox.information(self, "Успех", "Промт успешно обновлен!")
+                logger.info(f"Обновлен промт с ID: {prompt_id}")
+            except Exception as e:
+                logger.error(f"Ошибка при обновлении промта: {e}")
+                QMessageBox.critical(self, "Ошибка", f"Не удалось обновить промт: {str(e)}")
+    
+    def delete_prompt(self):
+        """Удаление выбранного промта"""
+        prompt_id = self.get_selected_prompt_id()
+        if not prompt_id:
+            QMessageBox.warning(self, "Предупреждение", "Выберите промт для удаления!")
+            return
+        
+        prompt_data = db.get_prompt_by_id(prompt_id)
+        if not prompt_data:
+            QMessageBox.warning(self, "Ошибка", "Промт не найден!")
+            return
+        
+        # Показываем превью промта в сообщении
+        preview = prompt_data.get("prompt", "")[:50] + "..." if len(prompt_data.get("prompt", "")) > 50 else prompt_data.get("prompt", "")
+        
+        reply = QMessageBox.question(
+            self,
+            "Подтверждение",
+            f"Вы уверены, что хотите удалить промт?\n\n"
+            f"Превью: {preview}\n\n"
+            "Внимание: Все связанные результаты также будут удалены.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                deleted = db.delete_prompt(prompt_id)
+                if deleted:
+                    self.load_prompts()
+                    QMessageBox.information(self, "Успех", "Промт успешно удален!")
+                    logger.info(f"Удален промт с ID: {prompt_id}")
+                else:
+                    QMessageBox.warning(
+                        self,
+                        "Ошибка",
+                        "Не удалось удалить промт."
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка при удалении промта: {e}")
+                QMessageBox.critical(self, "Ошибка", f"Не удалось удалить промт: {str(e)}")
+
+
 class ModelManagementDialog(QDialog):
     """Диалог для управления моделями"""
     
@@ -1092,6 +1416,8 @@ class MainWindow(QMainWindow):
         settings_menu = menubar.addMenu('Настройки')
         models_action = settings_menu.addAction('Управление моделями...')
         models_action.triggered.connect(self.manage_models)
+        prompts_action = settings_menu.addAction('Управление промтами...')
+        prompts_action.triggered.connect(self.manage_prompts)
         
         # Меню "Справка"
         help_menu = menubar.addMenu('Справка')
@@ -1794,6 +2120,13 @@ class MainWindow(QMainWindow):
         if dialog.exec_() == QDialog.Accepted:
             # Обновление кэша моделей после изменений
             self.model_manager.invalidate_cache()
+    
+    def manage_prompts(self):
+        """Управление промтами"""
+        dialog = PromptManagementDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            # Обновление списка промтов после изменений
+            self.load_prompts()
     
     def show_about(self):
         """Показать информацию о программе"""
