@@ -919,6 +919,71 @@ class PromptManagementDialog(QDialog):
                 QMessageBox.critical(self, "Ошибка", f"Не удалось удалить промт: {str(e)}")
 
 
+class SettingsDialog(QDialog):
+    """Диалог настроек приложения"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Настройки")
+        self.setModal(True)
+        self.setMinimumSize(400, 250)
+        self.init_ui()
+        self.load_settings()
+    
+    def init_ui(self):
+        """Инициализация интерфейса"""
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        
+        # Форма настроек
+        form_group = QGroupBox("Внешний вид")
+        form_layout = QFormLayout()
+        form_group.setLayout(form_layout)
+        
+        # Выбор темы
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["Светлая", "Темная"])
+        form_layout.addRow("Тема:", self.theme_combo)
+        
+        # Выбор размера шрифта
+        self.font_size_combo = QComboBox()
+        font_sizes = ["8", "9", "10", "11", "12", "14", "16", "18", "20"]
+        self.font_size_combo.addItems(font_sizes)
+        form_layout.addRow("Размер шрифта:", self.font_size_combo)
+        
+        layout.addWidget(form_group)
+        
+        # Кнопки
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def load_settings(self):
+        """Загрузка текущих настроек"""
+        theme = db.get_setting("theme", "light")
+        if theme == "dark":
+            self.theme_combo.setCurrentIndex(1)
+        else:
+            self.theme_combo.setCurrentIndex(0)
+        
+        font_size = db.get_setting("font_size", "10")
+        index = self.font_size_combo.findText(font_size)
+        if index >= 0:
+            self.font_size_combo.setCurrentIndex(index)
+    
+    def get_settings(self) -> Dict[str, str]:
+        """Получение настроек из формы"""
+        theme = "dark" if self.theme_combo.currentIndex() == 1 else "light"
+        font_size = self.font_size_combo.currentText()
+        return {
+            "theme": theme,
+            "font_size": font_size
+        }
+
+
 class ModelManagementDialog(QDialog):
     """Диалог для управления моделями"""
     
@@ -1623,6 +1688,7 @@ class MainWindow(QMainWindow):
             db.init_database()
         
         self.init_ui()
+        self.load_settings()  # Загружаем и применяем настройки после создания UI
         self.load_prompts()
     
     def init_ui(self):
@@ -1674,6 +1740,9 @@ class MainWindow(QMainWindow):
         
         # Меню "Настройки"
         settings_menu = menubar.addMenu('Настройки')
+        app_settings_action = settings_menu.addAction('Настройки приложения...')
+        app_settings_action.triggered.connect(self.show_settings)
+        settings_menu.addSeparator()
         models_action = settings_menu.addAction('Управление моделями...')
         models_action.triggered.connect(self.manage_models)
         prompts_action = settings_menu.addAction('Управление промтами...')
@@ -2445,16 +2514,171 @@ class MainWindow(QMainWindow):
             # Обновление списка промтов после изменений
             self.load_prompts()
     
+    def show_settings(self):
+        """Открытие диалога настроек"""
+        dialog = SettingsDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            settings = dialog.get_settings()
+            # Сохраняем настройки в БД
+            db.set_setting("theme", settings["theme"])
+            db.set_setting("font_size", settings["font_size"])
+            # Применяем настройки
+            self.apply_settings(settings)
+            QMessageBox.information(self, "Успех", "Настройки сохранены!")
+            logger.info(f"Настройки обновлены: {settings}")
+    
+    def load_settings(self):
+        """Загрузка настроек из БД и применение их"""
+        theme = db.get_setting("theme", "light")
+        font_size = db.get_setting("font_size", "10")
+        settings = {
+            "theme": theme,
+            "font_size": font_size
+        }
+        self.apply_settings(settings)
+    
+    def apply_settings(self, settings: Dict[str, str]):
+        """Применение настроек к интерфейсу"""
+        # Применение темы
+        theme = settings.get("theme", "light")
+        if theme == "dark":
+            self.setStyleSheet("""
+                QMainWindow {
+                    background-color: #2b2b2b;
+                    color: #ffffff;
+                }
+                QWidget {
+                    background-color: #2b2b2b;
+                    color: #ffffff;
+                }
+                QGroupBox {
+                    border: 1px solid #555555;
+                    border-radius: 5px;
+                    margin-top: 10px;
+                    padding-top: 10px;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    left: 10px;
+                    padding: 0 5px;
+                }
+                QLineEdit, QTextEdit, QPlainTextEdit, QComboBox {
+                    background-color: #3c3c3c;
+                    color: #ffffff;
+                    border: 1px solid #555555;
+                    border-radius: 3px;
+                    padding: 5px;
+                }
+                QPushButton {
+                    background-color: #404040;
+                    color: #ffffff;
+                    border: 1px solid #555555;
+                    border-radius: 3px;
+                    padding: 5px 15px;
+                }
+                QPushButton:hover {
+                    background-color: #505050;
+                }
+                QPushButton:pressed {
+                    background-color: #353535;
+                }
+                QTableWidget {
+                    background-color: #2b2b2b;
+                    color: #ffffff;
+                    gridline-color: #555555;
+                    alternate-background-color: #333333;
+                }
+                QHeaderView::section {
+                    background-color: #404040;
+                    color: #ffffff;
+                    padding: 5px;
+                    border: 1px solid #555555;
+                }
+                QLabel {
+                    color: #ffffff;
+                }
+            """)
+        else:
+            # Светлая тема - сбрасываем стили
+            self.setStyleSheet("")
+        
+        # Применение размера шрифта
+        font_size = int(settings.get("font_size", "10"))
+        app_font = QFont()
+        app_font.setPointSize(font_size)
+        self.setFont(app_font)
+        
+        # Применяем шрифт ко всем виджетам панелей
+        self.apply_font_to_panels(font_size)
+    
+    def apply_font_to_panels(self, font_size: int):
+        """Применение размера шрифта к панелям"""
+        font = QFont()
+        font.setPointSize(font_size)
+        
+        # Применяем к основным виджетам панелей
+        widgets_to_update = [
+            'prompt_text', 'results_table', 'prompt_combo', 
+            'prompt_search_input', 'results_search_input',
+            'sort_combo', 'tags_input'
+        ]
+        
+        for widget_name in widgets_to_update:
+            if hasattr(self, widget_name):
+                widget = getattr(self, widget_name)
+                if widget:
+                    widget.setFont(font)
+        
+        # Применяем шрифт ко всем дочерним виджетам
+        def apply_font_recursive(widget, font):
+            """Рекурсивное применение шрифта ко всем дочерним виджетам"""
+            widget.setFont(font)
+            for child in widget.findChildren(QWidget):
+                if isinstance(child, (QTextEdit, QPlainTextEdit, QLineEdit, QComboBox, QLabel, QTableWidget)):
+                    child.setFont(font)
+        
+        # Применяем к центральному виджету и его детям
+        central = self.centralWidget()
+        if central:
+            apply_font_recursive(central, font)
+    
     def show_about(self):
         """Показать информацию о программе"""
-        QMessageBox.about(
-            self,
-            "О программе ChatList",
-            "ChatList v1.0\n\n"
-            "Программа для сравнения ответов различных нейросетей.\n\n"
-            "Позволяет отправлять один промт в несколько нейросетей\n"
-            "и сравнивать их ответы."
-        )
+        about_text = """
+        <h2>ChatList v1.0</h2>
+        <p><b>Программа для сравнения ответов различных нейросетей</b></p>
+        
+        <p>ChatList позволяет отправлять один промт в несколько нейросетей 
+        одновременно и сравнивать их ответы в удобной таблице.</p>
+        
+        <h3>Основные возможности:</h3>
+        <ul>
+            <li>Отправка промта в несколько моделей параллельно</li>
+            <li>Сравнение ответов от разных нейросетей</li>
+            <li>Сохранение промтов и результатов в базу данных</li>
+            <li>Работа через OpenRouter API - один ключ для всех моделей</li>
+            <li>Поддержка моделей от OpenAI, Anthropic, DeepSeek, Google, Meta и других</li>
+            <li>Улучшение промтов с помощью AI-ассистента</li>
+            <li>Экспорт результатов в Markdown и JSON</li>
+        </ul>
+        
+        <h3>Технологии:</h3>
+        <ul>
+            <li>Python 3.11+</li>
+            <li>PyQt5 для интерфейса</li>
+            <li>SQLite для хранения данных</li>
+            <li>OpenRouter API для доступа к моделям</li>
+        </ul>
+        
+        <p><i>© 2024 ChatList</i></p>
+        """
+        
+        msg = QMessageBox(self)
+        msg.setWindowTitle("О программе ChatList")
+        msg.setTextFormat(Qt.RichText)
+        msg.setText(about_text)
+        msg.setIcon(QMessageBox.Information)
+        msg.exec_()
 
 
 def main():
