@@ -157,6 +157,15 @@ def _init_default_data(cursor, conn):
             INSERT OR IGNORE INTO settings (key, value)
             VALUES (?, ?)
         """, (key, value))
+    
+    # Установка модели для улучшения промтов по умолчанию (первая активная модель)
+    cursor.execute("SELECT id FROM models WHERE is_active = 1 ORDER BY id LIMIT 1")
+    default_model = cursor.fetchone()
+    if default_model:
+        cursor.execute("""
+            INSERT OR IGNORE INTO settings (key, value)
+            VALUES (?, ?)
+        """, ("improvement_model_id", str(default_model["id"])))
 
     conn.commit()
 
@@ -615,4 +624,23 @@ def get_all_settings() -> Dict[str, str]:
         return {row["key"]: row["value"] for row in cursor.fetchall()}
     finally:
         conn.close()
+
+
+def get_improvement_model_id() -> Optional[int]:
+    """Получение ID модели для улучшения промтов"""
+    model_id_str = get_setting("improvement_model_id")
+    if model_id_str:
+        try:
+            model_id = int(model_id_str)
+            # Возвращаем None, если ID равен 0 (не выбрана модель)
+            return model_id if model_id > 0 else None
+        except ValueError:
+            logger.warning(f"Некорректное значение improvement_model_id: {model_id_str}")
+            return None
+    return None
+
+
+def set_improvement_model_id(model_id: int) -> bool:
+    """Установка ID модели для улучшения промтов"""
+    return set_setting("improvement_model_id", str(model_id))
 
